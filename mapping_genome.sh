@@ -4,7 +4,7 @@ for file in trimmed/*.fastq; do
 
 	#Ejecutar hisat2
 	hisat2 -p 1 -x ../hg19_index -U "$file" -S "mapped_out/${base}.sam" \
-	--summary-file "mapped_out/${base}_hisat2_sum.txt" 2> "mapped_out/${base}_hisat2.log"
+	2> "mapped_out/${base}_hisat2.log"
 
 	#Convertir SAM a BAM, ordenar e indexar
 	samtools sort -m 1G -o "mapped_out/${base}_sorted.bam" "mapped_out/${base}.sam"
