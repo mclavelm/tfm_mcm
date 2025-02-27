@@ -8,13 +8,13 @@ This repository contains scripts for processing sequencing data:
 
 ## **1. Trimming: `trimming.sh`**
 This script performs quality trimming on raw FASTQ files using fastp.
-**Dependencies**
--[`fastp`] (https://github.com/OpenGene/fastp)
+**Dependencies**  
+-[`fastp`] (https://github.com/OpenGene/fastp)  
 Run the script inside the folder containing raw FASTQ files.
 
-## **2. Mapping to reference genome: `mapping_genome.sh`**
-This script aligns trimmed sequencing reads to the hg19 reference genome using HISAT2 and processes the output with samtools.
-**Dependencies**
--[`HISAT2`] (https://daehwankimlab.github.io/hisat2/)
--[`samtools`] (https://www.htslib.org/doc/samtools.html)
+## **2. Mapping to reference genome: `mapping_genome.sh`**  
+This script aligns trimmed sequencing reads to the hg19 reference genome using HISAT2 and processes the output with samtools.  
+**Dependencies**  
+-[`HISAT2`] (https://daehwankimlab.github.io/hisat2/)  
+-[`samtools`] (https://www.htslib.org/doc/samtools.html)  
 
