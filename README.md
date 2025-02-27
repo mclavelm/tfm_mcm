@@ -18,3 +18,13 @@ This script aligns trimmed sequencing reads to the hg19 reference genome using H
 -[`HISAT2`] (https://daehwankimlab.github.io/hisat2/)  
 -[`samtools`] (https://www.htslib.org/doc/samtools.html)  
 
+## **3. Mapping to transcriptome: `mapping_trans.sh`**
+This script aligns trimmed sequencing reads to the hg19 reference transcriptome using HISAT2 and processes the output with samtools.  
+**Dependencies**  
+-[`HISAT2`] (https://daehwankimlab.github.io/hisat2/)  
+-[`samtools`] (https://www.htslib.org/doc/samtools.html)  
+
+## **4. Extracting alignment statistics: `alignment_stats.sh`**
+This script extracts key alignment statistics from BAM files, including total reads, alignment rate, mapped reads and mismatch rate. Results are collected into a CSV file for further analysis.  
+**Dependencies**  
+-[`samtools`] (https://www.htslib.org/doc/samtools.html)  
