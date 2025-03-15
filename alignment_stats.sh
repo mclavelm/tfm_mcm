@@ -1,7 +1,7 @@
 #Definimos los directorios
-hisat2_dir="mapped_out_trans"
+hisat2_dir="mapped_out_trans_max1"
 tmap_dir="bam_iontorrent"
-output_file="comparacion_alineamiento.csv"
+output_file="comparacion_alineamiento2.csv"
 
 #Cabecera
 echo "sample,total_reads,alignment_rate,mapped_reads,mismatch_rate,aligner" > "$output_file"
