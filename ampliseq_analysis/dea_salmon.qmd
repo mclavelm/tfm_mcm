@@ -154,14 +154,6 @@ ggplot(dea_results_anot, aes(x= logFC, y= -log10(FDR)))+
 ```
 
 ```{r}
-#INTERPRETACIÓN
-#Los genes que se encuentran más arriba en la gráfica tienen una alta significancia estadística. Los genes más alejados del 0 en el eje x indican mayor cambio en la expresión entre las condiciones: hacia la izquierda (negativos) son más expresados en msc, mientras que los genes hacia la derecha (positivos) son más expresados en wat.
-#El coef=2 que hemos definido antes es lo que nos indica que la comparación es wat contra msc: msc es baseline, por lo que si es positivo el logfc es que se sobreexpresa en wat, mientras que si es negativo se sobreexpresa en msc.
-#Se expresan más en adipocitos in vitro (msc) genes relacionados con adhesión celular, comunicación célula-célula y matriz extracelular. 
-#Se expresa más en adipocitos in vivo (wat) genes relacionados con la vascularización, respuesta inmune y regulación del pH. 
-```
-
-```{r}
 #vamos a sacar números
 num_genes_total <- nrow(top_genes)
 
@@ -220,14 +212,6 @@ dotplot(kegg)
 ```
 
 ```{r}
-#INTERPRETACIÓN
-#ALS, PARKINSON: puede estar relacionado con estrés celular y agregación de proteínas. AUTOFAGIA también estrés.  
-#INFECCIONES BACTERIANAS: pueden activar respuestas inmunes, también relación con estrés celular (todo se puede relacionar con estrés)
-#ENDOCITOSIS: dinámica celular, internalización de moléculas, señalización celular. #PROCESAMIENTO DE PROTEÍNAS, PROTEOLISIS: estrés celular, estrés oxidativo, falta de nutrientes.
-#NAFLD: metabolismo de lípidos, nos interesa!! 
-```
-
-```{r}
 #GSEA + KEGG: GSEA hace ranking de todos los genes y detecta los pathways de manera global, en vez de hacer por FDR<0.05 (no usa solo los significativos)
 library(clusterProfiler)
 library(enrichplot)
@@ -273,7 +257,15 @@ head(gsea_kegg@result %>% arrange(NES))
 #Ahora quiero tratar de identificar genes metabólicos similares entre adipocitos in vitro (msc) e in vivo (wat) utilizando los leading edge genes de gsea.
 #Extraemos los genes signinficativos de GSEA y kegg a partir del gsea
 #Los leading edge genes son ls genes que más contribuyen a la señal de enriquecimiento, por lo que son más relevantes dentro de cada ruta. Extraemos y dividimos los genes en una lista, para luego unirlos en un vector y eliminar duplicados. 
-leading_genes_list <- strsplit(gsea_kegg@result$core_enrichment, "/")
+
+#AÑADO UN FILTRADO ADICIONAL: SOLO RUTAS METABÓLICAS
+metabolic_path <- grep("metabolism|biosynthesis|cycle|lipid|glucose",
+                       gsea_kegg@result$Description,
+                       ignore.case = TRUE,
+                       value = TRUE)
+filtered_gsea<- gsea_kegg@result[gsea_kegg@result$Description %in% metabolic_path, ]
+
+leading_genes_list <- strsplit(filtered_gsea$core_enrichment, "/")
 leading_genes<- unique(unlist(leading_genes_list))
 
 #Extraemos los conteos normalizados de la lista dge inicial, que creamos al inicio del análisis. 
@@ -354,8 +346,10 @@ genes_similares_inter <- intersect(genes_interes, genes_similares)
 library(pheatmap)
 # Filtrar datos para los genes similares
 expr_genes_similares <- expr_data_genes[rownames(expr_data_genes) %in% genes_similares_inter, ]
-
-# Crear heatmap con clustering basado en correlación
+expr_genes_similares <- unique(expr_genes_similares)
+# Crear heatmap con clustering basado en correlación.Cada gen se normaliza para que todos tengan la misma importancia en el análisis, independientemente de su nivel de expresión. 
+#La distancia entre genes se calcula utilizando la correlación entre sus niveles de expresión en las muestras: si dos genes tienen patrones de expresión similares entre las muestras, estarán más cerca entre sí en el dendograma. 
+#El método de agrupamiento es wardd2, que minimiza la varianza dentro de los grupos
 pheatmap(as.matrix(expr_genes_similares),
          scale = "row",
          clustering_distance_rows = "correlation",
@@ -365,8 +359,73 @@ pheatmap(as.matrix(expr_genes_similares),
 ```
 
 ```{r}
-#INTERPRETACIÓN
-#
+#Distribución de correlacciones: importante para ver si los genes muestran patrones similares entre msc y wat
+sorted_gene_correlation <- sort(gene_correlation, decreasing = TRUE)
+hist(gene_correlation, main="Distribución de correlaciones", xlab="Correlación MSC-WAT", breaks=30, col="orange")
+
+#Interpretación: barras positivas significa que los genes tienen correlación positiva entre los grupos, mientras que negativa cuando aumenta en un grupo, disminuye en el otro. 
+
+```
+
+```{r}
+#otra vez diferencias de expresión entre msc y wat, pero con otros datos: creamos un nuevo dataframe con 3 columnas (gen, msc y wat). Se calcula la expresión promedio de cada gen en cada grupo (recordatorio: estos genes son los que tienen alta correlación). 
+expr_means <- data.frame(
+    Gene = rownames(expr_genes_similares),
+    MSC = rowMeans(expr_data_msc[rownames(expr_data_msc) %in% genes_similares_inter, ]),
+    WAT = rowMeans(expr_data_wat[rownames(expr_data_wat) %in% genes_similares_inter, ])
+)
+#Agregamos nueva columna con el log2fc para ver cuanto de diferente es la expresión de wat respecto a msc para cada gen (>0 significa más expresado en wat, y al revés)
+expr_means$Log2FC <- log2(expr_means$WAT / expr_means$MSC)
+
+boxplot(expr_means$MSC, expr_means$WAT, names=c("MSC", "WAT"), col=c("orange", "darkblue"), main="Expresión promedio de genes similares")
+
+```
+
+```{r}
+#pca de los genes seleccionados para ver si las muestras msc y wat se agrupan bien según la expresión de estos genes
+library(ggplot2)
+
+#prcomp realiza el análisis de componentes principales, que encuentra combinaciones lineales de los genes que explican la variabilidad de los datos. Tenemos que convertir las filas (genes) a columnas, y las columnas (muestras) a filas. Se normaliza antes de analizar. 
+pca_res <- prcomp(t(expr_genes_similares), scale. = TRUE)
+
+#Extraemos los valores de las componentes principales del resultado del análisis. Los valores que se extraen son las coordenadas para cada muestra en el "mapa". También añadimos columna adicional para el tipo de muestra al que pertenece. 
+pca_df <- data.frame(PC1 = pca_res$x[,1], PC2 = pca_res$x[,2], Condition = rep(c("MSC", "WAT"), each=8))
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Condition)) +
+    geom_point() +
+    theme_minimal() +
+    labs(title="PCA de genes metabólicos similares", x="PC1", y="PC2")
+```
+
+```{r}
+#análisis de función de los genes seleccionados
+library(clusterProfiler)
+enrich_res <- enrichGO(genes_similares_inter, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP", pAdjustMethod = "BH")
+dotplot(enrich_res, showCategory=10)
+
+```
+
+```{r}
+#Voy a modificar el código anterior para que las muestras estén pareadas-> esté código aún no está bien!!
+library(pheatmap)
+
+#Reorganizar las columnas para que MSC y WAT estén juntos: las 8 primeras columnas pertenecen a msc, las últimas a wat. Como queremos que cada par esté junto al otro en el mapa, definimos un nuevo orden de columnas. 
+paired_order <- c(1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15, 8, 16) 
+expr_genes_similares_paired <- expr_data_genes[, paired_order]
+
+#Creamos una anotación para identificar las muestras
+sample_type <- rep(c("MSC", "WAT"), each = 8) 
+annotation_col <- data.frame(Condition = sample_type)
+rownames(annotation_col) <- colnames(expr_genes_similares_paired)
+
+#Generar el heatmap con anotaciones
+pheatmap(as.matrix(expr_genes_similares_paired), 
+         scale = "row", 
+         clustering_distance_cols = "correlation", # Cluster según correlación
+         clustering_method = "average",
+         annotation_col = annotation_col, 
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         fontsize_row = 8, fontsize_col = 8)
 ```
 
 ```{r}
