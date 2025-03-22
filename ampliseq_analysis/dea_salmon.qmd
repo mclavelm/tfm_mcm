@@ -1,0 +1,391 @@
+---
+title: "dea_salmon"
+output: pdf_document
+---
+
+```{r}
+#Cargar las librerías para el manejo de datos
+library(edgeR)
+library(tximport)
+library(tidyverse)
+library(dplyr)
+```
+
+```{r}
+#configurar los directorios e importar los archivos de salmon: hay que definir las rutas de los archivos quant.sf y luego importarlos a r con tximport -> tximport carga las cantidades de las transcripciones (TMP, conteos de lecturas)
+
+#Se definen las rutas de los directorios donde se encuentran los resultados de salmon para dos tipos de muestras: una correspondiente al grupo msc y otra al grupo wat. Estos directorios son los que contienen los archivos quant.sf generados por salmon.
+salmon_dir<- c("../../msc/salmon_msc", "../../sc_wat/salmon_wat")
+
+#Usamos list.files para crear una lista de todos los archivos llamados quant.sf debtri de los directorios. Buscamos los archivos de cuantificación de salmon a lo largo de todos los directorios (recursive) y con las rutas completas (full.names). 
+samples<- list.files(salmon_dir, pattern = "quant.sf", recursive = TRUE, full.names = TRUE)
+
+#Se extraen los nombres de las muestras a partir de las rutas de los archivos quant.sf. Primero se obtiene los nombres de los directorios que contienen los archivos (dirname) y luego el nombre final de cada muestra (basename). 
+sample_names<- basename(dirname(samples))
+
+#Se asigna el tipo de muestra a cada archivo: si el nombre del archivo contiene la palabra salmon_msc se le asigna msc, si no, se asigna wat. 
+sample_type<- ifelse(grepl("salmon_msc", samples), "MSC", "WAT")
+
+#Extraemos también el ID del donante
+donor_id <- sub("-.*", "", sample_names)
+
+#Se crea un data.frame con la información de cada muestra. 
+sample_info<- data.frame(sample= sample_names, origin= sample_type, donor= donor_id, row.names = sample_names)
+
+#Usamos tximport para importar los datos de cuantificación a nivel de transcritos generados por salmon. Los archivos .sf se cargan especificando el tipo de datos como salmon, y el parámetro txout asegura que se mantenga la cuantificación a nivel de transcritos. 
+txi<- tximport(samples, type = "salmon", txOut = TRUE)
+```
+
+```{r}
+#Igual podemos añadir aquí el cálculo de TPM (transcripts per million)-> nos hacemos una idea de cómo están distribuidos los valores
+tpm<- txi$counts / rowSums(txi$counts) * 1e6
+
+#Cuantificación de la expresión: generamos un boxplot de TPMs por muestra para ver la distribución de la expresión
+library(ggplot2)
+library(reshape2)
+tpm_data <- as.data.frame(txi$abundance)
+tpm_data_long <- melt(tpm_data)
+
+ggplot(tpm_data_long, aes(x = variable, y= value))+ 
+  geom_boxplot(fill= "orange", color = "black", alpha= 0.7) +
+  theme_classic() +
+  labs(title = "Distribución de TPMs por muestra",
+       x= "Muestras",
+       y= "TPM")+
+   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+#Creamos un objeto dgelist para almacenar la info relacionada con los conteos de lecturas. 
+dge<- DGEList(counts = txi$counts)
+
+#Se asigna el factor group a cada muestra, indicando el origen de la muestra. Factor asegura que se trate la columna como un factor (variable categórica, msc o wat) -> de esta forma r hace las comparaciones necesarias entre los grupos para determinar qué genes tienen diferencias significativas entre las condiciones. 
+dge$samples$group <- factor(sample_info$origin)
+dge$samples$donor <- factor(sample_info$donor)
+dge$samples$origin <- factor(sample_info$origin)
+
+#Con la función filterByExpr se filtran genes con baja expresión: evalúa qué genes tienen suficiente expresión en al menos un mínimo de muestras para ser considerados en el análisis. Los genes con una expresión muy baja en todas las muestras se descartan-> no aportan info útil. 
+filtered_genes<- filterByExpr(dge)
+
+#Actualizamos el objeto dge para mantener solo los genes que pasaron el filtro de expresión. Con el parámetro keep.lib.sizes nos aseguramos que la cantidad de lecturas por muestra no se ajusten. 
+dge<- dge[filtered_genes, , keep.lib.sizes = FALSE]
+
+#Normalización: corregimos las diferencias en la profundidad de secuenciación entre las muestras para que las comparaciones entre muestras sean más equitativas. La función calcula factores de normalización para cada muestra para que las diferencias en la cantidad total de lecturas no sesguen el análisis. 
+dge<- calcNormFactors(dge)
+
+```
+
+```{r}
+#Igual podemos añadir un histograma para ver el filtrado de genes con baja expresión
+#También posible barplot para ver la normalización 
+```
+
+```{r}
+#Ajustamos el modelo para la expresión diferencial (msc vs wat) 
+#Se crea una matriz de diseño: necesaria para ajustar el modelo estadístico que se usará para el análisis. Se modela la relación entre los grupos como la variable de interés.  
+design_groups<- model.matrix(~ dge$samples$group)
+
+#Calcular la dispersión entre datos (variabilida de los conteos de lecturas para cada gen, para saber cuánto de confiables son las diferencias en la expresión génica). Si los datos tienen alta variabilidad, será más difícil detectar las diferencias significativas. La dispersión se calcula en función de la matriz de diseño. 
+dge_groups <- dge
+dge_groups<- estimateDisp(dge_groups, design_groups)
+
+#Se ajusta un modelo lineal generalizado (GLM) para comparar las condiciones msc y wat. Recordatorio: dge contiene los conteos de lecturas normalizados y la información de las muestras, y la matriz de diseño especifica la relación entre las condiciones y los datos. Así evaluamos si hay diferencias significativas en la expresión génica de las dos condiciones. 
+fit <- glmQLFit(dge_groups, design_groups)
+
+#Se realiza una prueba de expresión diferencial basada en el modelo de GLM. Se realiza la prueba quasi-likehood f-test (QLF) para evaluar las diferencias significativas. Con coef=2 nos referimos al coeficiente de la segunda columna de la matriz de diseño(en nuestro caso, wat en comparación con la condición msc). 
+#El QLF-test es una extensión del anterior, diseñado para trabajar con datos de conteos de alta variabilidad. Ajusta la dispersión de cada gen individualmente. 
+results_groups <- glmQLFTest(fit, coef = 2)
+
+#Seleccionamos los resultados más relevantes del análisis de expresión diferencial. Se guarda todo el conjunto de resultados (n=inf) 
+dea_results <- topTags(results_groups, n= Inf)
+
+#Se convierte el objeto a un data.frame, que contiene los resultados de la prueba de expresión diferencial (más fácil de manipular y visualizar resultados). 
+dea_results_df <- as.data.frame(dea_results)
+
+```
+
+```{r}
+#Conteos transformados a logCPM
+```
+
+```{r}
+#Trabajamos con biomart para mapear los identificadores de transcritos de ensemble a identificadores de genes y símbolos correspondientes. 
+
+library(biomaRt)
+
+#Nos conectamos a la base de datos de ensemble, indicando que trabajamos con datos de genes humanos. 
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+#Extraemos los identificadores de los transcritos  de los resultados de la expresión diferencial. 
+transcripts <- row.names(dea_results$table)
+
+#Limpiamos los identificadores de los transcritos (eliminar cualquier codsa que venga después de _ o .). 
+clean_transcripts <- gsub("_.*|\\..*", "", transcripts)
+
+#Con getBM se realiza una consulta a la base de datos para obtener la información que necesitamos: con attributes le pedimos el identificador del transcrito de ensembl, el identificador y símbolo del gen correspondiente. Realizamos el filtrado por el identificador del transcrito de ensembl y los valores que usamos para filtrar son los transcritos. 
+gene_info <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "external_gene_name"),
+                   filters = "ensembl_transcript_id",
+                   values = clean_transcripts,
+                   mart = ensembl)
+
+#Añadimos una columna al data.frame de los resultados con los identificadores de los transcritos en un formato adecuado para poder mapear con la información de ensembl. 
+dea_results_df <- dea_results_df %>%
+  mutate(ensembl_transcript_id = gsub("_.*|\\..*", "", rownames(dea_results_df)))
+
+#Unimos las anotaciones de los transcritos con los resultados de expresión diferencial. Se agregan las columnas correspondientes de gene_info, que contiene los identificadores de genes y símbolos. Especificamos que la unión se realice por la columna, ya limpia, de los identificadores de transcritos. 
+dea_results_anot <- left_join(dea_results_df, gene_info, by= "ensembl_transcript_id")
+
+```
+
+```{r}
+#visualización de resultados (volcan)
+library(ggplot2)
+library(ggrepel)
+#Selecciono los genes que tienen un valor de p ajustado (FDR) menor a 0.05, lo que implica significancia estadística, y los que tienen un logFC absoluto mayor de 2, lo que indica un cambio significativo en la expresión entre las condiciones. 
+top_genes<- dea_results_anot %>%
+  filter(FDR < 0.05 & abs(logFC) > 2)
+
+
+ggplot(dea_results_anot, aes(x= logFC, y= -log10(FDR)))+
+  geom_point()+
+  geom_text_repel(data = top_genes, aes(label= external_gene_name))+
+  theme_classic()
+
+```
+
+```{r}
+#INTERPRETACIÓN
+#Los genes que se encuentran más arriba en la gráfica tienen una alta significancia estadística. Los genes más alejados del 0 en el eje x indican mayor cambio en la expresión entre las condiciones: hacia la izquierda (negativos) son más expresados en msc, mientras que los genes hacia la derecha (positivos) son más expresados en wat.
+#El coef=2 que hemos definido antes es lo que nos indica que la comparación es wat contra msc: msc es baseline, por lo que si es positivo el logfc es que se sobreexpresa en wat, mientras que si es negativo se sobreexpresa en msc.
+#Se expresan más en adipocitos in vitro (msc) genes relacionados con adhesión celular, comunicación célula-célula y matriz extracelular. 
+#Se expresa más en adipocitos in vivo (wat) genes relacionados con la vascularización, respuesta inmune y regulación del pH. 
+```
+
+```{r}
+#vamos a sacar números
+num_genes_total <- nrow(top_genes)
+
+#sobreexpresados en wat
+num_genes_up <- sum(top_genes$logFC >0)
+
+#sobreexpresados en msc
+num_genes_down<- sum(top_genes$logFC <0)
+porcentaje_down <- round((num_genes_down / num_genes_total) * 100, 1)
+
+#obtener los genes más diferencialmente expresados
+top_up <- top_genes %>%
+  arrange(desc(logFC)) %>%
+  slice_head(n = 3)
+top_down <- top_genes %>%
+  arrange(logFC) %>%
+  slice_head(n = 3)
+```
+
+```{r}
+#Upset plot
+library(UpSetR)
+
+#Definimos el umbral para la presencia del gen en cada muestra
+threshold <- 1
+
+#Creamos una matriz binaria: los valores true indican que el gen está presente en la muestra
+gene_presence <- cpm(dge) > threshold
+
+#Para el upset plot, creamos un dataframe
+gene_presence_df <- as.data.frame(gene_presence)
+
+#Creamos la gráfica de intersección
+upset_data <- gene_presence_df %>%
+  dplyr::select(-sample) %>%
+  dplyr::group_by(group) %>%
+  dplyr::summarize_all(sum)
+
+```
+
+```{r}
+#vamos a probar kegg
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+#Conversión de id de ensembl a entrezid para hacer un análisis de enriquecimiento en kegg.Para eso usamos la función bitr. 
+gene_id <- dea_results_anot$ensembl_gene_id
+entrez_id <- bitr(gene_id, fromType = "ENSEMBL", toType= "ENTREZID", OrgDb= org.Hs.eg.db)
+
+#Realizamos el análisis de enriquecimiento: la función identifica las rutas enriquecidas en el conjunto de genes diferencialmente expresados. Se establece un valor p de corte de 0.05 para seleccionar las rutas más significativas. 
+kegg <- enrichKEGG(entrez_id$ENTREZID, organism = "hsa", pvalueCutoff = 0.05)
+
+#Visualización
+dotplot(kegg)
+```
+
+```{r}
+#INTERPRETACIÓN
+#ALS, PARKINSON: puede estar relacionado con estrés celular y agregación de proteínas. AUTOFAGIA también estrés.  
+#INFECCIONES BACTERIANAS: pueden activar respuestas inmunes, también relación con estrés celular (todo se puede relacionar con estrés)
+#ENDOCITOSIS: dinámica celular, internalización de moléculas, señalización celular. #PROCESAMIENTO DE PROTEÍNAS, PROTEOLISIS: estrés celular, estrés oxidativo, falta de nutrientes.
+#NAFLD: metabolismo de lípidos, nos interesa!! 
+```
+
+```{r}
+#GSEA + KEGG: GSEA hace ranking de todos los genes y detecta los pathways de manera global, en vez de hacer por FDR<0.05 (no usa solo los significativos)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+
+#Ordenamos los genes por el logfc y creamos un vector con los valores logfc de todos los genes, asignando los identificadores de los transcritos de ensembl a cada valor de logfc. 
+gene_gsea <- dea_results_df$logFC
+names(gene_gsea) <- dea_results_anot$ensembl_gene_id
+
+#Para usar GSEA hay que convertir los identificadores ensembl a entrezid. 
+gene_conv <- bitr(names(gene_gsea), fromType = "ENSEMBL", toType = "ENTREZID", OrgDb=org.Hs.eg.db)
+
+#Usamos los entrezid para reemplazar los id de ensembl en el vector anterior. Ahora tenemos el vector con los logfc de los genes y el entrezid como identificador de los mismos. 
+gene_gsea <- gene_gsea[gene_conv$ENSEMBL]
+names(gene_gsea) <- gene_conv$ENTREZID
+
+#Para que gsea haga el análisis bien, hay que ordenar los genes en orden descendente. De esta forma, los genes con mayor logfc (mayor expresión) están en la parte superior del ranking, y de esta forma distingue entre genes upregulados y dowregulados. 
+gene_gsea <- sort(gene_gsea, decreasing = TRUE)
+
+#Lanzamos gsea con los pathways de kegg. Para eso pasamos la lista de los genes ordenados por logfc, que es la que usa gsea para determinar las rutas enriquecidas. nPerm especifica el número de permutaciones aleatorias para calcular la puntuación de enriquecimiento, y obtener un p valor confiable (se suele usar un número grande para asegurar robustez). Solo consideramos las rutas con FDR menor a 0.05 como significativas. 
+gsea_kegg <- gseKEGG(geneList = gene_gsea,
+                     organism = "hsa",
+                     nPerm= 1000,
+                     pvalueCutoff = 0.05)
+
+#Visualizamos primero con dotplot: cada punto representa una ruta, cuanto más a la derecha esté, más enriquecida está. 
+dotplot(gsea_kegg, showCategory= 15)
+
+#Con el ridgeplot se ve cómo se distribuyen las puntuaciones de las rutas en las permutaciones, para ver si está consistentemente enriquecido-> útil para detectar rutas robustas. 
+ridgeplot(gsea_kegg)
+
+```
+
+```{r}
+#INTERPRETACIÓN
+#NES (enrichment score) es una medida de la fuerza de la asociación de una ruta con el ránking de logfc. Si es positivo, es más activo en msc, mientras que si es negativo es más activo en wat. 
+head(gsea_kegg@result %>% arrange(NES))
+
+#Me pierdo un poco con la interpretación de esto
+```
+
+```{r}
+#Ahora quiero tratar de identificar genes metabólicos similares entre adipocitos in vitro (msc) e in vivo (wat) utilizando los leading edge genes de gsea.
+#Extraemos los genes signinficativos de GSEA y kegg a partir del gsea
+#Los leading edge genes son ls genes que más contribuyen a la señal de enriquecimiento, por lo que son más relevantes dentro de cada ruta. Extraemos y dividimos los genes en una lista, para luego unirlos en un vector y eliminar duplicados. 
+leading_genes_list <- strsplit(gsea_kegg@result$core_enrichment, "/")
+leading_genes<- unique(unlist(leading_genes_list))
+
+#Extraemos los conteos normalizados de la lista dge inicial, que creamos al inicio del análisis. 
+expr_data <- cpm(dge, log = TRUE)
+
+#Filtramos los genes con mayor variabilidad: los que tengan poca variabilidad es posible que no contribuyan mucho a la diferencia entre msc y wat. Selecciono los genes en el percentil 50 de varianza. 
+gene_varianza <- apply(expr_data, 1, var)
+genes_baja_var <- names(gene_varianza[gene_varianza <= quantile(gene_varianza, 0.5)])
+
+#Como queremos solo los leading edge genes que además tengan baja variabilidad en la expresión, volvemos a filtrar para quedarnos con el conjunto de genes metabólicos más relevantes en msc y wat. 
+#Pero cada uno de ellos tiene una identificación distinta, hay que convertirlos a la misma-> símbolos de genes
+leading_genes_symbols<- bitr(leading_genes, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+genes_baja_var_clean <- gsub("_.*|\\..*", "", genes_baja_var)
+gene_info_var <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "external_gene_name"),
+                        filters = "ensembl_transcript_id",
+                        values = genes_baja_var_clean,
+                        mart = ensembl)
+genes_baja_var_final <- gene_info_var$external_gene_name
+genes_interes<- intersect(leading_genes_symbols$SYMBOL, genes_baja_var_final)
+```
+
+```{r}
+#Extraemos una matriz de expresión de los genes de interés
+#Los identificadores están en formato de transcritos ensembl, así que los convertimos a símbolos de genes
+#Limpiamos los identificadores de transcritos
+clean_transcripts_expr <- gsub("_.*|\\..*", "", rownames(expr_data))
+
+#Mapeo de transcritos a símbolos de genes
+transcript_info <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "external_gene_name"),
+                         filters = "ensembl_transcript_id",
+                         values = clean_transcripts_expr,
+                         mart = ensembl)
+# Aseguramos que haya nombres de genes válidos y no vacíos
+transcript_info <- transcript_info[transcript_info$external_gene_name != "", ]
+
+#Mapeamos los transcritos a sus símbolos de genes
+mapped_symbols <- transcript_info$external_gene_name[match(clean_transcripts_expr, transcript_info$ensembl_transcript_id)]
+
+#Reemplazamos los NA o nombres vacíos con unknown
+mapped_symbols[is.na(mapped_symbols) | mapped_symbols == ""] <- "Unknown"
+
+#Convertimos expr_data a data.frames y añadimos los símbolos de genes
+expr_data <- as.data.frame(expr_data)
+expr_data$gene_symbol <- mapped_symbols
+
+#Eliminamos la columna de gene_symbol antes de convertir de nuevo a matriz
+expr_data_matrix <- as.matrix(expr_data[, -ncol(expr_data)])
+
+#Asignamos los nombres de los genes a las filas
+rownames(expr_data_matrix) <- mapped_symbols
+
+#Filtramos solo los genes de interés
+expr_data_genes <- expr_data_matrix[rownames(expr_data_matrix) %in% genes_interes, ]
+
+#Verificamos que no haya filas vacías: eliminamos los genes no mapeados
+expr_data_genes <- expr_data_genes[rownames(expr_data_genes) != "Unknown", ]
+
+```
+
+```{r}
+#Vamos a buscar genes que tengan patrones similares de expresión: tienen que tener alta correlación de expresión. 
+expr_data_msc <- expr_data_genes[, 1:8]
+expr_data_wat <- expr_data_genes[, 9:16]
+#Calcular la correlación entre MSC y WAT para cada gen
+gene_correlation <- apply(expr_data_genes, 1, function(x) cor(x[1:8], x[9:16]))
+
+#Filtrar los genes que tengan una baja correlación
+genes_similares <- names(gene_correlation[gene_correlation > 0.3])
+#Eliminar valores na(hay demasiados)
+genes_similares <- genes_similares[!is.na(genes_similares)]
+
+#Intersección de genes similares con genes metabólicos seleccionados
+genes_similares_inter <- intersect(genes_interes, genes_similares)
+
+```
+
+```{r}
+library(pheatmap)
+# Filtrar datos para los genes similares
+expr_genes_similares <- expr_data_genes[rownames(expr_data_genes) %in% genes_similares_inter, ]
+
+# Crear heatmap con clustering basado en correlación
+pheatmap(as.matrix(expr_genes_similares),
+         scale = "row",
+         clustering_distance_rows = "correlation",
+         clustering_method = "ward.D2",
+         show_rownames = TRUE,
+         main = "Expresión de genes metabólicos similares en MSC y WAT")
+```
+
+```{r}
+#INTERPRETACIÓN
+#
+```
+
+```{r}
+#Identificar genes de enriquecimiento comunes-> intersección de los leading edge genes.
+genes_similares_intersect <- intersect(genes_interes, genes_similares)
+
+#Visualización
+#filtrar los datos para los genes que muestran mucha correlación
+expr_genes_similares <- expr_data_genes[rownames(expr_data_genes) %in% genes_similares_intersect, ]
+heatmap(as.matrix(expr_genes_similares), scale= "row")
+```
+
+```{r}
+#INTERPRETACIÓN
+#Como he usado la opción scale_row, cada gen se normaliza-> los valores de expresión para cada gen se estandarizan para tener una media de 0 y una desviación de 1. 
+#Colores: blanco (expresión cercana a la media de todas las muestras para ese gen), rojo (mucha más expresión que el promedio)
+```
+
+```{r}
+#INTERPRETACIÓN
+#Se aprecian 2 grupos distintos, osea que hay diferencias claras en la expresión génica. 
+```
