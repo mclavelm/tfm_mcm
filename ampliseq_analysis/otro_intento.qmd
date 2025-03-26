@@ -1,0 +1,454 @@
+---
+title: "comparación módulos wat y msc"
+format: pdf
+editor: visual
+---
+
+```{r}
+#Cargar las librerías para el manejo de datos
+library(edgeR)
+library(tximport)
+library(tidyverse)
+library(dplyr)
+library(readODS)
+library(WGCNA)
+library(biomaRt)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(biomaRt)
+library(ggplot2)
+```
+
+ 
+
+```{r}
+#configurar los directorios e importar los archivos de salmon: hay que definir las rutas de los archivos quant.sf y luego importarlos a r con tximport -> tximport carga las cantidades de las transcripciones (TMP, conteos de lecturas)
+
+#Se definen las rutas de los directorios donde se encuentran los resultados de salmon para dos tipos de muestras: una correspondiente al grupo msc y otra al grupo wat. Estos directorios son los que contienen los archivos quant.sf generados por salmon.
+salmon_dir<- c("../../msc/salmon_msc", "../../sc_wat/salmon_wat")
+
+#Usamos list.files para crear una lista de todos los archivos llamados quant.sf debtri de los directorios. Buscamos los archivos de cuantificación de salmon a lo largo de todos los directorios (recursive) y con las rutas completas (full.names). 
+samples<- list.files(salmon_dir, pattern = "quant.sf", recursive = TRUE, full.names = TRUE)
+
+#Se extraen los nombres de las muestras a partir de las rutas de los archivos quant.sf. Primero se obtiene los nombres de los directorios que contienen los archivos (dirname) y luego el nombre final de cada muestra (basename). 
+sample_names<- basename(dirname(samples))
+
+#Se asigna el tipo de muestra a cada archivo: si el nombre del archivo contiene la palabra salmon_msc se le asigna msc, si no, se asigna wat. 
+sample_type<- ifelse(grepl("salmon_msc", samples), "MSC", "WAT")
+
+#Extraemos también el ID del donante
+donor_id <- sub("-.*", "", sample_names)
+
+#Se crea un data.frame con la información de cada muestra. 
+sample_info<- data.frame(sample= sample_names, origin= sample_type, donor= donor_id, row.names = sample_names)
+
+#Usamos tximport para importar los datos de cuantificación a nivel de transcritos generados por salmon. Los archivos .sf se cargan especificando el tipo de datos como salmon, y el parámetro txout asegura que se mantenga la cuantificación a nivel de transcritos. 
+txi<- tximport(samples, type = "salmon", txOut = TRUE)
+
+#Importamos la información de  los donantes
+clinical_data<- read_ods("pacientes_modificado.ods", sheet = 1)
+
+#Creamos un objeto dgelist para almacenar la info relacionada con los conteos de lecturas. 
+dge<- DGEList(counts = txi$counts)
+clinical_data <- clinical_data %>%
+  mutate(sample_id = paste(IDmuestra, tejido, sep = "_"))
+
+#Se asigna el factor group a cada muestra, indicando el origen de la muestra. Factor asegura que se trate la columna como un factor (variable categórica, msc o wat) -> de esta forma r hace las comparaciones necesarias entre los grupos para determinar qué genes tienen diferencias significativas entre las condiciones. 
+dge$samples$group <- factor(sample_info$origin)
+dge$samples$donor <- factor(sample_info$donor)
+dge$samples$origin <- factor(sample_info$origin)
+dge$samples <- dge$samples %>%
+  mutate(sample_id = paste(donor, origin, sep = "_"))
+clinical_data <- clinical_data[match(dge$samples$sample_id, clinical_data$sample_id), ]
+
+#Normalización: corregimos las diferencias en la profundidad de secuenciación entre las muestras para que las comparaciones entre muestras sean más equitativas. La función calcula factores de normalización para cada muestra para que las diferencias en la cantidad total de lecturas no sesguen el análisis. 
+dge<- calcNormFactors(dge)
+
+#Probamos una matriz de correlaciones 
+exp_matriz <- cpm(dge, log = TRUE)
+
+#Limpiar los nombres de los genes eliminando todo después del punto
+rownames(exp_matriz) <- sub("\\..*", "", rownames(exp_matriz))
+
+```
+
+```{r}
+#Separamos las muestras wat y msc: separamos los datos de expresión en dos conjuntos distintos, en el formato que luego nos pide wgcna
+data_exp_wat <- t(exp_matriz[, sample_info$origin == "WAT"])
+data_exp_msc <- t(exp_matriz[, sample_info$origin == "MSC"])
+
+#Filtramos genes de baja expresión (poca variabilidad, no aportan info)
+rownames(dge$counts) <- gsub("\\..*", "", rownames(dge$counts))
+keep_genes <- filterByExpr(dge, group= sample_info$origin)
+
+#Aplicamos el filtrado a dge y recalculamos la matriz
+dge<- dge[keep_genes, , keep.lib.sizes = FALSE]
+exp_matriz<- cpm(dge, log = TRUE)
+exp_matriz_wat <- exp_matriz[, sample_info$origin == "WAT"]
+exp_matriz_msc <- exp_matriz[, sample_info$origin == "MSC"]
+```
+
+```{r}
+#Construir la red de coexpresión en wat
+exp_matriz_wat_trans <- as.data.frame(t(exp_matriz_wat))
+
+#Seleccionar el parámetro de potencia
+powers<- c(1:20)
+sft_wat <- pickSoftThreshold(exp_matriz_wat_trans, powerVector = powers)
+
+#Construcción de red
+net_wat <- blockwiseModules(
+  exp_matriz_wat_trans,
+  power = 6, 
+  TOMType = "unsigned",
+  minModuleSize = 30,
+  reassignThreshold = 0,
+  mergeCutHeight = 0.25
+)
+saveRDS(net_wat, file = "net_wat.rds")
+net_wat <-readRDS("net_wat.rds")
+```
+
+```{r}
+#Visualizar dendograma
+plotDendroAndColors(net_wat$dendrograms[[1]],
+                    net_wat$colors[net_wat$blockGenes[[1]]])
+```
+
+```{r}
+#Visualizar correlación entre módulos: calculamos la similutud de topología entre los genes de la matriz. TOM refleja la similitud entre genes, considerando las interacciones con otros genes (0, sin similitud, 1, similitud perfecta)
+TOM <- TOMsimilarityFromExpr(exp_matriz_wat, power = 6) 
+
+#Matriz de dis-similitud (complementaria a TOM)-> transformamos similitud en disimilitud, restando cada valor de la matriz TOM 1. Aquí es al revés (0 similitud perfecta, 1 diferencia máxima)
+dissTOM <- 1 - TOM 
+
+#Para resaltar las diferencias entre módulos elevamos cada valor de la matriz de disimilitud para resaltar más las diferencias: las conexiones más débiles entre genes serán aún más pequeñas, y más fáciles de distinguir visualmente en el gráfico (ayuda a enfatizar diferencias y resaltar conexiones fuertes)
+plotTOM <- dissTOM^7  
+
+#Eliminamos diagonal (representa la similitud de un gen consigo mismo, 1)
+diag(plotTOM) <- NA 
+
+#Mapa de calor de la matriz de adyacencia
+heatmap(plotTOM, col = colorRampPalette(c("blue", "white", "red"))(100))
+```
+
+```{r}
+#Lo mismo con msc
+exp_matriz_msc_trans <- as.data.frame(t(exp_matriz_msc))
+net_msc <- blockwiseModules(
+  exp_matriz_msc_trans,
+  power = 6,  
+  TOMType = "unsigned", 
+  minModuleSize = 30,
+  reassignThreshold = 0,
+  mergeCutHeight = 0.25
+)
+saveRDS(net_msc, file= "net_msc.rds")
+net_msc<- readRDS("net_msc.rds")
+#Se extraen los genes de cada módulo 
+genes_wat <- split(rownames(exp_matriz_wat), net_wat$colors)
+genes_msc <- split(rownames(exp_matriz_msc), net_msc$colors)
+
+#Comparar los genes entre módulos
+overlap_genes <- mapply(function(wat_genes, msc_genes) {
+  intersect(wat_genes, msc_genes)
+}, genes_wat, genes_msc)
+
+
+```
+
+Vale, los resultados de overlap_genes tiene los genes comunes entre los módulos de coexpresión en wat y msc, ya que se han comparado los genes agrupados en módulos en ambas condiciones. Hay algunos módulos con genes comunes, y otros vacíos. La idea ahora sería explorar los módulos con genes comunes, hacer análisis de enriquecimiento de esos genes y ver si están relacionados con funciones biológicas específicas.
+
+```{r}
+#Ordeno de mayor a menor cantidad de genes 
+module_sizes<- sapply(overlap_genes, length)
+overlap_genes_sorted <- overlap_genes[order(module_sizes, decreasing = TRUE)]
+#Así veo cuales son los módulos con más genes
+```
+
+```{r}
+#Z SCORE: métrica que indica si un módulo está preservado
+#Primero preparamos los datos para la función modulePreservation: evalúa qué módulos de wat se conservan en msc-> determinar si los módulos identificados en wat siguen teniendo una estructura y relevancia similar en msc (indicaría que los cultivos in vitro pueden replicar parte de las condiciones in vivo)
+#Hay muchos genes son varianza 0, lo cual da problemas en modulepreservation-> filtramos
+exp_matriz_msc_trans<- as.matrix(exp_matriz_msc_trans)
+gsg_wat <- goodSamplesGenes(exp_matriz_wat_trans)
+exp_matriz_msc_trans <- exp_matriz_msc_trans[gsg_msc$goodSamples, gsg_msc$goodGenes]
+
+exp_matriz_wat_trans<- as.matrix(exp_matriz_wat_trans)
+gsg_msc <- goodSamplesGenes(exp_matriz_msc_trans)
+exp_matriz_wat_trans <- exp_matriz_wat_trans[gsg_wat$goodSamples, gsg_wat$goodGenes]
+
+multiexpr<- list(
+  wat= list(data = exp_matriz_wat_trans),
+  msc= list(data= exp_matriz_msc_trans)
+)
+
+#Asignamos colores de módulos de wat, que es la "referencia"; pero hemos modificado el número de genes en el filtrado de antes!! y color_labels tiene que ser del mismo tamaño que multiexp$wat$data
+#Obtener los genes restantes después del filtrado en las matrices de expresión
+remaining_genes_wat <- colnames(multiexpr$wat$data)
+remaining_genes_msc <- colnames(multiexpr$msc$data)
+
+#Hay que crear un vector de etiquetas de módulos para cada conjunto de expresión
+color_labels <- net_wat$colors
+color_labels_wat_filtered <- color_labels[remaining_genes_wat]
+color_labels_msc_filtered <- color_labels[remaining_genes_msc]
+multicolor <- list(
+  wat = color_labels_wat_filtered,   
+  msc = color_labels_msc_filtered   
+)
+
+preservation_results <- modulePreservation(
+  multiexpr,
+  multiColor = multicolor,
+  referenceNetworks = 1, #es wat
+  testNetworks = 2, #es msc
+  nPermutations = 200, #es lo mínimo
+  randomSeed = 12345 #como se usan permutaciones aleatorias para evaluar la preservación de los módulos, se generan datos al azar, así que los resultados pueden variar entre ejecuciones. Fijando una semilla aleatoria el análisis producirá los mismos resultados.
+)
+saveRDS(preservation_results, file= "preservation_results.rds")
+preservation_results<- readRDS("preservation_results.rds")
+#Zsummary indica cuanto de bien se conserva la conectividad y estructura del módulo
+z_sum <- preservation_results$preservation$Z
+z_summary <- z_sum$ref.wat$inColumnsAlsoPresentIn.msc$Zsummary.pres
+colors[z_summary < 2] <- "gray"     
+colors[z_summary >= 2 & z_summary <= 10] <- "yellow" 
+colors[z_summary > 10] <- "orange"   
+barplot(z_summary,
+        main = "Preservación de módulos: Zsummary",
+        col = colors,
+        las = 2, 
+        ylab = "Zsummary")
+
+```
+
+```{r}
+#MEDIAN RANK: ordena módulos por preservación relativa (más bajo el rango medio, mayor preservación)(complementa z score)
+median_rank <- preservation_results$preservation$observed$ref.wat$inColumnsAlsoPresentIn.msc$medianRank.pres
+
+colors_median <- rep(NA, length(median_rank))
+colors_median [median_rank >20] <- "gray"
+colors_median [median_rank >= 10 & median_rank <= 20] <- "yellow"
+colors_median [median_rank <10] <- "orange"
+ 
+barplot(median_rank,
+        main = "Median Rank",
+        col = colors_median,
+        las = 2, 
+        ylab = "Median Rank")
+```
+
+```{r}
+preservation_df_median <- data.frame(
+  z_summary = z_summary,
+  median_rank = median_rank
+)
+selected_modules_median <- preservation_df_median[preservation_df_median$z_summary > 2 & preservation_df_median$median_rank < 10, ]
+```
+
+```{r}
+#Voy a obtener los genes de los módulos seleccionados
+#Problema: los módulos están nombrados por números, pero al principio estaban por colores; hay que ver cómo hago para ver cual corresponde a cual
+#Extraer los módulos preservados desde los nombres de fila
+preserved_module_numbers <- as.numeric(rownames(selected_modules_median))
+preserved_module_numbers <- preserved_module_numbers[!is.na(preserved_module_numbers)]
+
+#Mapear los números de módulos a los colores de net_wat
+preserved_module_colors <- rownames(module_info)[preserved_module_numbers]
+preserved_module_colors <- paste0("ME", preserved_module_colors)
+
+#Extraer los genes de cada módulo preservado
+genes_by_module <- lapply(preserved_module_colors, function(color) {
+  names(net_wat$colors)[net_wat$colors == gsub("ME", "", color)]
+})
+
+```
+
+```{r}
+#MODULO1
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_1 <- genes_by_module[[1]]
+genes_convertidos_1 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_1, 
+                           mart = mart)
+entrez_1 <- bitr(genes_convertidos_1$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_1 <- enrichGO(gene          = entrez_1$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_1, showCategory = 5) 
+```
+
+```{r}
+#MODULO2
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_2 <- genes_by_module[[2]]
+genes_convertidos_2 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_2, 
+                           mart = mart)
+entrez_2 <- bitr(genes_convertidos_2$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_2 <- enrichGO(gene          = entrez_2$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_2, showCategory = 5) 
+```
+
+```{r}
+#MODULO3
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_3 <- genes_by_module[[3]]
+genes_convertidos_3 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_3, 
+                           mart = mart)
+entrez_3 <- bitr(genes_convertidos_3$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_3 <- enrichGO(gene          = entrez_3$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_3, showCategory = 5) 
+```
+
+```{r}
+#MODULO4
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_4 <- genes_by_module[[4]]
+genes_convertidos_4 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_4, 
+                           mart = mart)
+entrez_4 <- bitr(genes_convertidos_4$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_4 <- enrichGO(gene          = entrez_4$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_4, showCategory = 5) 
+```
+
+```{r}
+#MODULO5
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_5 <- genes_by_module[[5]]
+genes_convertidos_5 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_5, 
+                           mart = mart)
+entrez_5 <- bitr(genes_convertidos_5$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_5 <- enrichGO(gene          = entrez_5$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_5, showCategory = 5) 
+```
+
+```{r}
+#MODULO6
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_6 <- genes_by_module[[6]]
+genes_convertidos_6 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_6, 
+                           mart = mart)
+entrez_6 <- bitr(genes_convertidos_6$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_6 <- enrichGO(gene          = entrez_6$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_6, showCategory = 5) 
+```
+
+```{r}
+#MODULO7
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_7 <- genes_by_module[[7]]
+genes_convertidos_7 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_7, 
+                           mart = mart)
+entrez_7 <- bitr(genes_convertidos_7$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_7 <- enrichGO(gene          = entrez_7$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_7, showCategory = 5) 
+```
+
+```{r}
+#MODULO8
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_module_8 <- genes_by_module[[8]]
+genes_convertidos_8 <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id"),
+                           filters = "ensembl_transcript_id",
+                           values = genes_module_8, 
+                           mart = mart)
+entrez_8 <- bitr(genes_convertidos_8$ensembl_gene_id, 
+                     fromType = "ENSEMBL", 
+                     toType = "ENTREZID", 
+                     OrgDb = org.Hs.eg.db)
+go_results_8 <- enrichGO(gene          = entrez_8$ENTREZID,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "BP",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff  = 0.05,
+                       qvalueCutoff  = 0.05)
+dotplot(go_results_8, showCategory = 5) 
+```
+
+```{r}
+#PERMUTACIONES: evalua la significancia estadística
+logp_values<- preservation_results$preservation$log.p$ref.wat$inColumnsAlsoPresentIn.msc
+logp_bonf_values <- preservation_results$preservation$log.pBonf$ref.wat$inColumnsAlsoPresentIn.msc
+
+preservation_df <- data.frame(
+  z_summary = z_summary,
+  log_p = logp_values$log.psummary.pres
+)
+selected_modules <- preservation_df[which(preservation_df$z_summary > 2 & abs(preservation_df$log_p) < 0.2), ]
+
+```
