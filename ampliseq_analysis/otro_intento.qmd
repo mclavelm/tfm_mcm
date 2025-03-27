@@ -171,14 +171,19 @@ overlap_genes_sorted <- overlap_genes[order(module_sizes, decreasing = TRUE)]
 #Z SCORE: métrica que indica si un módulo está preservado
 #Primero preparamos los datos para la función modulePreservation: evalúa qué módulos de wat se conservan en msc-> determinar si los módulos identificados en wat siguen teniendo una estructura y relevancia similar en msc (indicaría que los cultivos in vitro pueden replicar parte de las condiciones in vivo)
 #Hay muchos genes son varianza 0, lo cual da problemas en modulepreservation-> filtramos
+#Convertimos las matrices de expreesión en matrices numéricas
 exp_matriz_msc_trans<- as.matrix(exp_matriz_msc_trans)
-gsg_wat <- goodSamplesGenes(exp_matriz_wat_trans)
-exp_matriz_msc_trans <- exp_matriz_msc_trans[gsg_msc$goodSamples, gsg_msc$goodGenes]
-
 exp_matriz_wat_trans<- as.matrix(exp_matriz_wat_trans)
+
+#Evaluamos la calidad de las muestras y genes 
+gsg_wat <- goodSamplesGenes(exp_matriz_wat_trans)
 gsg_msc <- goodSamplesGenes(exp_matriz_msc_trans)
+
+#Filtramos las matrices 
+exp_matriz_msc_trans <- exp_matriz_msc_trans[gsg_msc$goodSamples, gsg_msc$goodGenes]
 exp_matriz_wat_trans <- exp_matriz_wat_trans[gsg_wat$goodSamples, gsg_wat$goodGenes]
 
+#Creamos una lista que contendrá los datos de expresión de ambos grupos, para hacer luego el análisis comparativo
 multiexpr<- list(
   wat= list(data = exp_matriz_wat_trans),
   msc= list(data= exp_matriz_msc_trans)
@@ -253,11 +258,14 @@ selected_modules_median <- preservation_df_median[preservation_df_median$z_summa
 preserved_module_numbers <- as.numeric(rownames(selected_modules_median))
 preserved_module_numbers <- preserved_module_numbers[!is.na(preserved_module_numbers)]
 
+#Extraer la tabla con la correspondencia entre módulos numerados y colores para mapear los módulos preservados a sus colores
+module_info <- preservation_results$quality$observed$ref.wat$inColumnsAlsoPresentIn.msc
+
 #Mapear los números de módulos a los colores de net_wat
 preserved_module_colors <- rownames(module_info)[preserved_module_numbers]
 preserved_module_colors <- paste0("ME", preserved_module_colors)
 
-#Extraer los genes de cada módulo preservado
+#Extraer los genes de cada módulo preservado basado en su color
 genes_by_module <- lapply(preserved_module_colors, function(color) {
   names(net_wat$colors)[net_wat$colors == gsub("ME", "", color)]
 })
@@ -283,7 +291,33 @@ go_results_1 <- enrichGO(gene          = entrez_1$ENTREZID,
                        pAdjustMethod = "fdr",
                        pvalueCutoff  = 0.05,
                        qvalueCutoff  = 0.05)
-dotplot(go_results_1, showCategory = 5) 
+dotplot(go_results_1, showCategory = 10) 
+```
+
+```{r}
+#Vamos a ver los genes que hay en este módulo
+#KME: identificar genes centrales dentro del módulo. KME mide la correlación de un gen con el eigengen del módulo (el gen más representativo del módulo)
+#Primero: sacar eigengen del módulo
+#Filtrar los colores para que coincidan con los genes
+color_labels_wat_filtered<- net_wat$colors[names(net_wat$colors) %in% colnames(exp_matriz_wat_trans)]
+mes_wat <- moduleEigengenes(exp_matriz_wat_trans, colors = color_labels_wat_filtered)$eigengenes
+
+#Extraemos el módulo desde mes_wat que se corresponde con el primer módulo de preserved (que es el que hemos analizado arriba)-> extraemos los valores del eigengen, que representa la expresión promedio ponderada de los genes en ese módulo
+eigengene_1 <- mes_wat[, preserved_module_colors[1]]
+
+#Ahora identificamos los genes centrales: primero calculamos la correlación de cada gen co el eigengen del módulo, para encontrar los genes más centrales
+kme_1 <- cor(exp_matriz_wat_trans, eigengene_1, use = "p")
+kme_1_df <- data.frame(kme_1)
+kme_1_sorted <- kme_1[order(kme_1[, 1], decreasing = TRUE), , drop = FALSE]
+kme_top_genes <- rownames(kme_1_sorted)[1:10]
+
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes_info <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "external_gene_name"),
+                    filters = "ensembl_transcript_id", 
+                    values = rownames(kme_1_sorted, 
+                    mart = mart)
+
+
 ```
 
 ```{r}
