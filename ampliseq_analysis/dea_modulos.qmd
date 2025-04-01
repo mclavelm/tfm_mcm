@@ -1,0 +1,154 @@
+---
+title: "modulos_expresion"
+format: pdf
+editor: visual
+---
+
+```{r}
+#Cargar las librerías para el manejo de datos
+library(edgeR)
+library(tximport)
+library(tidyverse)
+library(dplyr)
+library(BiocManager)
+library(BioNERO)
+library(WGCNA)
+library(biomaRt)
+library(pheatmap)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+```
+
+```{r}
+#configurar los directorios e importar los archivos de salmon: hay que definir las rutas de los archivos quant.sf y luego importarlos a r con tximport -> tximport carga las cantidades de las transcripciones (TMP, conteos de lecturas)
+
+#Se definen las rutas de los directorios donde se encuentran los resultados de salmon para dos tipos de muestras: una correspondiente al grupo msc y otra al grupo wat. Estos directorios son los que contienen los archivos quant.sf generados por salmon.
+salmon_dir<- c("../../msc/salmon_msc", "../../sc_wat/salmon_wat")
+
+#Usamos list.files para crear una lista de todos los archivos llamados quant.sf debtri de los directorios. Buscamos los archivos de cuantificación de salmon a lo largo de todos los directorios (recursive) y con las rutas completas (full.names). 
+samples<- list.files(salmon_dir, pattern = "quant.sf", recursive = TRUE, full.names = TRUE)
+
+#Se extraen los nombres de las muestras a partir de las rutas de los archivos quant.sf. Primero se obtiene los nombres de los directorios que contienen los archivos (dirname) y luego el nombre final de cada muestra (basename). 
+sample_names<- basename(dirname(samples))
+
+#Se asigna el tipo de muestra a cada archivo: si el nombre del archivo contiene la palabra salmon_msc se le asigna msc, si no, se asigna wat. 
+sample_type<- ifelse(grepl("salmon_msc", samples), "MSC", "WAT")
+
+#Extraemos también el ID del donante
+donor_id <- sub("-.*", "", sample_names)
+
+#Se crea un data.frame con la información de cada muestra. 
+sample_info<- data.frame(sample= sample_names, origin= sample_type, donor= donor_id, row.names = sample_names)
+
+#Usamos tximport para importar los datos de cuantificación a nivel de transcritos generados por salmon. Los archivos .sf se cargan especificando el tipo de datos como salmon, y el parámetro txout asegura que se mantenga la cuantificación a nivel de transcritos. 
+txi<- tximport(samples, type = "salmon", txOut = TRUE)
+#Creamos un objeto dgelist para almacenar la info relacionada con los conteos de lecturas. 
+dge<- DGEList(counts = txi$counts)
+
+#Se asigna el factor group a cada muestra, indicando el origen de la muestra. Factor asegura que se trate la columna como un factor (variable categórica, msc o wat) -> de esta forma r hace las comparaciones necesarias entre los grupos para determinar qué genes tienen diferencias significativas entre las condiciones. 
+dge$samples$group <- factor(sample_info$origin)
+dge$samples$donor <- factor(sample_info$donor)
+dge$samples$origin <- factor(sample_info$origin)
+```
+
+```{r}
+#Vamos a construir el módulo de genes en WAT para analizar su estructura "basal" antes de compararlo con MSC.
+#Filtramos para quedarnos solo con las muestras WAT 
+wat_dge<- dge[, dge$samples$group == "WAT"]
+wat_expr<- cpm(wat_dge, log = TRUE)
+wat_expr<- na.omit(wat_expr)
+
+#Creamos la red de coexpresión
+#Genes en filas, muestras en columnas!
+wat_expr_trans <- t(wat_expr)
+```
+
+```{r}
+#
+net_wat <- blockwiseModules(wat_expr_trans, 
+                        power = 5, 
+                        TOMType = "signed", 
+                        minModuleSize = 30, 
+                        reassignThreshold = 0, 
+                        mergeCutHeight = 0.25, 
+                        numericLabels = TRUE, 
+                        pamRespectsDendro = FALSE)
+modules_wat <- split(names(net_wat$colors), net_wat$colors)
+ 
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+transcripts_modules_wat <- names(net_wat$colors)
+
+#Limpiamos los identificadores de los transcritos (eliminar cualquier codsa que venga después de _ o .). 
+clean_transcripts_wat <- gsub("_.*|\\..*", "", transcripts_modules_wat)
+clean_transcripts_net <- gsub("_.*|\\..*", "", names(net_wat$colors))
+gene_info <- getBM(attributes = c("ensembl_transcript_id", "ensembl_gene_id", "external_gene_name"),
+                   filters = "ensembl_transcript_id",
+                   values = clean_transcripts_wat,
+                   mart = ensembl)
+
+gene_modules_wat <- data.frame(
+  transcript_id = transcripts_modules_wat,
+  clean_transcript_id = clean_transcripts_wat,
+  module = net_wat$colors[transcripts_modules_wat]  
+)
+
+gene_modules_wat <- merge(gene_modules_wat, gene_info, by.x = "clean_transcript_id", by.y = "ensembl_transcript_id", all.x = TRUE)
+
+#recordatorio: hasta ahora hemos identificado módulos de genes que se coexpresan en wat, y cada módulo representa un grupo de genes que tienen patrones de expresión similares en las muestras de tejido. Ahora vamos a comparar estos módulos con la expresión en adipocitos in vitro para ver si la organización de la coexpresión se mantiene. 
+```
+
+Con table(net\$colors) se ve cuántos módulos hay y cuántos genes tiene cada uno: la mayoría están agrupados en el módulo 0 (205122), pero en el resto de módulos también hay genes repartidos. Si queremos ver qué genes están en cada módulo: lapply(split(gene_modules\$external_gene_name, gene_modules\$module), head).
+
+```{r}
+#Hacemos análisis de enriquecimiento funcional para los módulos
+#Lista para almacenar los resultados
+enrichment_results_wat <- list()
+
+#Iterar sobre cada módulo
+for (mod in unique(gene_modules_wat$module)) {
+  
+  genes_modulo_wat <- gene_modules_wat$ensembl_gene_id[gene_modules_wat$module == mod]
+  
+  # Asegurar que hay suficientes genes en el módulo para hacer el análisis
+  if (length(genes_modulo) >= 10) { 
+    ego <- enrichGO(gene = genes_modulo_wat, 
+                    OrgDb = org.Hs.eg.db, 
+                    keyType = "ENSEMBL", 
+                    ont = "BP", 
+                    pAdjustMethod = "BH")
+    enrichment_results_wat[[paste0("Module_", mod)]] <- ego
+  }
+}
+```
+
+```{r}
+#Tabla resumen por módulo
+#Crear un df con todos los resultados de GO combinados
+all_go_wat <- do.call(rbind, lapply(names(enrichment_results_wat), function(mod) {
+  df <- enrichment_results_wat[[mod]]@result
+  df$Module <- mod
+  return(df)
+}))
+
+#Filtrar por p ajustado < 0.05
+sig_go_wat <- all_go_wat[all_go_wat$p.adjust < 0.05, ]
+saveRDS(sig_go_wat, "GO_significativos_wat.rds")
+
+#Generar la tabla de resumen por módulo, seleccionando los tres términos más significativos
+top_go_per_module_wat <- sig_go %>%
+  group_by(Module) %>%
+  top_n(-3, p.adjust)
+saveRDS(top_go_per_module_wat, "Top_GO_por_módulo_wat")
+
+```
+
+```{r}
+#Comparar módulos de WAT con MSC: preservación de módulos!! Habría que saber si los módulos identificados en WAT son consistentes cuando se aplican a un nuevo conjunto de datos (MSC). ¿Cómo medir la preservación? Z score, mide la conservación de la estructura de la red y la consistencia de módulos entre grupos (valores altos buena preservación). También índice de preservación. Si los módulos de wat son preservados en msc, indica que puede ser un buen modelo para estudiar la biología de wat.
+
+```
+
+```{r}
+#Evaluación visual: redes de coexpresión con igraph p ggraph para ver la estructura de los módulos y ver cómo se superponen entre los dos grupos. 
+
+```
