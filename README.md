@@ -1,5 +1,5 @@
 # tfm_mcm
-**Bioinformatics pipeline for analyzing AmpliSeq data from mesenchymal stem cells and adipose tissue.** Includes quality control, trimming, alignment, and differential expression analysis. Part of a Master's Thesis. 
+**Bioinformatics pipeline for analyzing AmpliSeq data from in vitro adipocytes derived from mesenchymal stem cells and in vivo adipose tissue.** Includes quality control, trimming, alignment, and differential expression analysis. Part of a Master's Thesis. 
 ## Overview
 This repository contains scripts for processing sequencing data:
 1. **Trimming** (`trimming.sh`)
