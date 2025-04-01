@@ -32,7 +32,7 @@ This .qmd file integrates clinical data from patients with the expression data o
 It attempts to correlate clinical variables with the gene expression profiles to explore potential patterns.  
 It serves as a basis for further refinement in incorporating clinical data into differential expression analysis.  
 
-## **5. Co-expression modules analysis: `modulos_coexpresion.qmd` **  
+## **5. Co-expression modules analysis: `modulos_coexpresion.qmd`**  
 This .qmd file focuses on identifying gene co-expression modules using the WGCNA  (Weighted Gene Co-expression Network Analysis) approach.   
 **Dependencies**   
 -[`WGCNA`] (https://fuzzyatelin.github.io/bioanth-stats/module-F21-Group1/module-F21-Group1.html)  
