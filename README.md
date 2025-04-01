@@ -7,24 +7,16 @@ This repository contains scripts for processing sequencing data:
 3. **Alignment statistics** (`alignment_stats.sh`)
 
 ## **1. Trimming: `trimming.sh`**
-This script performs quality trimming on raw FASTQ files using fastp.
+This script performs quality trimming on raw fastq files using fastp.
 **Dependencies**  
 -[`fastp`] (https://github.com/OpenGene/fastp)  
-Run the script inside the folder containing raw FASTQ files.
+Run the script inside the folder containing raw fastq files.
 
-## **2. Mapping to reference genome: `mapping_genome.sh`**  
-This script aligns trimmed sequencing reads to the hg19 reference genome using HISAT2 and processes the output with samtools.  
-**Dependencies**  
--[`HISAT2`] (https://daehwankimlab.github.io/hisat2/)  
--[`samtools`] (https://www.htslib.org/doc/samtools.html)  
+## **2. Quantification: `salmon.sh`**
+This script performs the quantification of every fastq file against a previously indexed transcriptome of reference.  
+**Dependencies**
+-[`salmon`] (https://combine-lab.github.io/salmon/)  
+Run the script inside the folder containing the trimmed fastq files. 
 
-## **3. Mapping to transcriptome: `mapping_trans.sh`**
-This script aligns trimmed sequencing reads to the hg19 reference transcriptome using HISAT2 and processes the output with samtools.  
-**Dependencies**  
--[`HISAT2`] (https://daehwankimlab.github.io/hisat2/)  
--[`samtools`] (https://www.htslib.org/doc/samtools.html)  
+## **3. Differential expression analysis and correlated genes: `dea_salmon.qmd`** 
 
-## **4. Extracting alignment statistics: `alignment_stats.sh`**
-This script extracts key alignment statistics from BAM files, including total reads, alignment rate, mapped reads and mismatch rate. Results are collected into a CSV file for further analysis.  
-**Dependencies**  
--[`samtools`] (https://www.htslib.org/doc/samtools.html)  
